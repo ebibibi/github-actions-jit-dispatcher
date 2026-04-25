@@ -1,0 +1,19 @@
+[Unit]
+Description=GitHub Actions JIT Runner Dispatcher
+After=network-online.target docker.service
+Wants=network-online.target
+Requires=docker.service
+
+[Service]
+Type=simple
+User=your-user
+Group=your-user
+WorkingDirectory=/opt/github-actions-jit-dispatcher
+ExecStart=/usr/bin/python3 /opt/github-actions-jit-dispatcher/dispatcher.py
+Restart=always
+RestartSec=10
+KillMode=process
+EnvironmentFile=/opt/github-actions-jit-dispatcher/.env
+
+[Install]
+WantedBy=multi-user.target
