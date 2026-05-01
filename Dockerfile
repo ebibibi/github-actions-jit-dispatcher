@@ -26,6 +26,16 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 # Azure CLI
 RUN curl -sL https://aka.ms/InstallAzureCLIDeb | bash
 
+# PowerShell Core (required by azure/powershell@v2 for Bicep deployments)
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends wget apt-transport-https software-properties-common \
+    && wget -q "https://packages.microsoft.com/config/ubuntu/$(lsb_release -rs)/packages-microsoft-prod.deb" \
+    && dpkg -i packages-microsoft-prod.deb \
+    && rm packages-microsoft-prod.deb \
+    && apt-get update \
+    && apt-get install -y --no-install-recommends powershell \
+    && rm -rf /var/lib/apt/lists/*
+
 # GitHub CLI
 RUN curl -fsSL https://cli.github.com/packages/githubcli-archive-keyring.gpg \
     | dd of=/usr/share/keyrings/githubcli-archive-keyring.gpg \
