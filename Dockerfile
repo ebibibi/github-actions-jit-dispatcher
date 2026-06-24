@@ -1,7 +1,7 @@
 FROM ubuntu:24.04
 
 ENV DEBIAN_FRONTEND=noninteractive
-ARG RUNNER_VERSION=2.333.1
+ARG RUNNER_VERSION=2.335.1
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
     ca-certificates curl wget git jq rsync zip unzip sudo lsb-release gnupg \
