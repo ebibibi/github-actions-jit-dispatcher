@@ -68,6 +68,13 @@ RUN pwsh -NoProfile -Command \
       "Set-PSRepository -Name PSGallery -InstallationPolicy Trusted; \
        Install-Module -Name Az -RequiredVersion 16.2.0 -Scope AllUsers -Force"
 
+# Azure Functions Core Tools
+# ワークフロー側の `npm install -g` は runner ユーザーだと
+# /usr/lib/node_modules へ書けず EACCES で失敗する（GitHub ホストランナーでは書ける）。
+# イメージに事前搭載しておけば権限問題も毎回のインストール時間も無くなる。
+RUN npm install -g azure-functions-core-tools@4 --unsafe-perm true \
+    && func --version
+
 # GitHub CLI
 RUN curl -fsSL https://cli.github.com/packages/githubcli-archive-keyring.gpg \
     | dd of=/usr/share/keyrings/githubcli-archive-keyring.gpg \
