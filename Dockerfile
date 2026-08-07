@@ -36,6 +36,18 @@ RUN apt-get update \
     && apt-get install -y --no-install-recommends powershell \
     && rm -rf /var/lib/apt/lists/*
 
+# Az PowerShell モジュール
+# azure/login の enable-AzPSSession: true は Az.Accounts を要求する。
+# PowerShell Core を入れただけでは足りず、モジュールが無いと
+# Connect-AzAccount が "Cannot bind argument to parameter 'Name' because it is null"
+# で必ず失敗する（2026-08-07 に graph-api-proxy / m365reporting で発生）。
+# GitHub ホストランナーには最初から入っているため、self-hosted へ移行した
+# 時点で気づかないまま壊れる。
+RUN pwsh -NoProfile -Command \
+      "Set-PSRepository -Name PSGallery -InstallationPolicy Trusted; \
+       Install-Module -Name Az.Accounts -RequiredVersion 5.5.2 -Scope AllUsers -Force; \
+       Install-Module -Name Az.Resources -RequiredVersion 10.1.0 -Scope AllUsers -Force"
+
 # GitHub CLI
 RUN curl -fsSL https://cli.github.com/packages/githubcli-archive-keyring.gpg \
     | dd of=/usr/share/keyrings/githubcli-archive-keyring.gpg \
