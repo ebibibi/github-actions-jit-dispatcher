@@ -49,6 +49,8 @@ runner_lock = Lock()
 spawned_jobs: dict[int, float] = {}
 cached_repos: list[str] = []
 repos_last_refreshed: float = 0
+# Rotating scan offset for poll_cycle, advanced each cycle to keep repos fair
+poll_offset: int = 0
 
 
 def load_token() -> str:
@@ -229,11 +231,21 @@ def prune_spawned_jobs():
 
 
 def poll_cycle(repos: list[str]):
+    global poll_offset
+
     cleanup_finished()
     prune_spawned_jobs()
 
     with runner_lock:
         total_active = len(active_runners)
+
+    # Scanning in a fixed order every cycle lets repos that continuously produce
+    # jobs hold all MAX_CONCURRENT slots, so repos later in the list never get
+    # served. Rotate the starting offset so every repo takes its turn at the front.
+    if repos:
+        poll_offset %= len(repos)
+        repos = repos[poll_offset:] + repos[:poll_offset]
+        poll_offset += 1
 
     for repo in repos:
         if total_active >= MAX_CONCURRENT:
