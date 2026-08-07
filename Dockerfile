@@ -31,7 +31,16 @@ RUN curl -sL https://aka.ms/InstallAzureCLIDeb | bash
 # 無いと「Cannot retrieve the dynamic parameters ... Please add Bicep」で失敗する。
 # GitHub ホストランナーには標準搭載されているため、self-hosted へ移行した
 # 時点で気づかないまま壊れる（2026-08-07 に graph-api-proxy / m365reporting で発生）。
-RUN az bicep install && az bicep version
+# az bicep install は実行ユーザーの ~/.azure/bin に入るため、root でビルドすると
+# runner ユーザーから見えない。全ユーザーが使えるよう /usr/local/bin に直接置く。
+RUN curl -sLo /usr/local/bin/bicep \
+      "https://github.com/Azure/bicep/releases/latest/download/bicep-linux-$(dpkg --print-architecture | sed 's/amd64/x64/')" \
+    && chmod +x /usr/local/bin/bicep \
+    && bicep --version
+
+# az CLI は既定で ~/.azure/bin の bicep を探すため、PATH 上の bicep を使わせる。
+# これが無いと az bicep 系のコマンドだけ「Bicep CLI not found」になる。
+ENV AZURE_BICEP_USE_BINARY_FROM_PATH=true
 
 # PowerShell Core (required by azure/powershell@v2 for Bicep deployments)
 RUN apt-get update \
