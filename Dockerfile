@@ -107,6 +107,14 @@ COPY entrypoint.sh /entrypoint.sh
 RUN chmod +x /entrypoint.sh
 
 USER runner
+
+# ワークフロー側が `npm install -g ...` を実行するのは珍しくないが、
+# GitHub ホストランナーと違って self-hosted では /usr/lib/node_modules に
+# 書けず EACCES で失敗する。runner 専用の書ける prefix に向けて回避する。
+# （システム領域の所有権をいじるより副作用が小さい）
+ENV NPM_CONFIG_PREFIX=/home/runner/.npm-global
+ENV PATH=/home/runner/.npm-global/bin:$PATH
+RUN mkdir -p /home/runner/.npm-global
 WORKDIR /home/runner
 
 ENTRYPOINT ["/entrypoint.sh"]
