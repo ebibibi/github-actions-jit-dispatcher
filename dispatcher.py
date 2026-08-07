@@ -11,6 +11,7 @@ Configuration via environment variables:
   MAX_CONCURRENT        Max parallel runners (default: 10)
   REPOS_REFRESH_SEC     Repo discovery interval in seconds (default: 300)
   API_BUDGET_PER_HOUR   GitHub API calls budget per hour (default: 4000)
+  MAX_PER_REPO_PER_CYCLE Max runners spawned per repo in one poll cycle (default: 1)
   RUNNER_LABELS         Comma-separated runner labels (default: self-hosted,linux,x64)
   DOCKER_SOCKET         Path to Docker socket (default: /var/run/docker.sock)
 """
@@ -34,6 +35,7 @@ REPOS_REFRESH_INTERVAL = int(os.environ.get("REPOS_REFRESH_SEC", "300"))
 API_CALLS_PER_HOUR_BUDGET = int(os.environ.get("API_BUDGET_PER_HOUR", "4000"))
 RUNNER_LABELS = os.environ.get("RUNNER_LABELS", "self-hosted,linux,x64").split(",")
 DOCKER_SOCKET = os.environ.get("DOCKER_SOCKET", "/var/run/docker.sock")
+MAX_PER_REPO_PER_CYCLE = int(os.environ.get("MAX_PER_REPO_PER_CYCLE", "1"))
 MIN_POLL_INTERVAL = 10
 
 logging.basicConfig(
@@ -251,8 +253,16 @@ def poll_cycle(repos: list[str]):
         if total_active >= MAX_CONCURRENT:
             break
 
+        # A repo with a burst of queued jobs (a batch of Dependabot PRs, say)
+        # would otherwise claim every free slot in a single cycle and keep doing
+        # so on the next one. Take at most one slot per repo per cycle so the
+        # capacity is spread across repos.
+        spawned_here = 0
+
         active_runs = get_active_runs(repo)
         for run in active_runs:
+            if spawned_here >= MAX_PER_REPO_PER_CYCLE:
+                break
             run_id = run["id"]
             pending_jobs = get_pending_jobs(repo, run_id)
 
@@ -260,12 +270,13 @@ def poll_cycle(repos: list[str]):
                 job_id = job["id"]
                 if job_id in spawned_jobs:
                     continue
-                if total_active >= MAX_CONCURRENT:
+                if total_active >= MAX_CONCURRENT or spawned_here >= MAX_PER_REPO_PER_CYCLE:
                     break
                 jit = generate_jit_config(repo)
                 if jit and spawn_runner(jit, repo):
                     spawned_jobs[job_id] = time.time()
                     total_active += 1
+                    spawned_here += 1
 
 
 def signal_handler(sig, _frame):
