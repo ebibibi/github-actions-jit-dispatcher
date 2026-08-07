@@ -43,10 +43,14 @@ RUN apt-get update \
 # で必ず失敗する（2026-08-07 に graph-api-proxy / m365reporting で発生）。
 # GitHub ホストランナーには最初から入っているため、self-hosted へ移行した
 # 時点で気づかないまま壊れる。
+# azure/powershell@v2 は azPSVersion の解決に **Az アンブレラモジュール**の存在を
+# 前提にしている。Az.Accounts / Az.Resources だけでは足りず、Az が無いと
+# アクション自身のラッパーがバージョン解決に失敗し、ユーザースクリプトを
+# 実行する前に "You cannot call a method on a null-valued expression." で落ちる
+# （2026-08-07 に graph-api-proxy / m365reporting で発生）。
 RUN pwsh -NoProfile -Command \
       "Set-PSRepository -Name PSGallery -InstallationPolicy Trusted; \
-       Install-Module -Name Az.Accounts -RequiredVersion 5.5.2 -Scope AllUsers -Force; \
-       Install-Module -Name Az.Resources -RequiredVersion 10.1.0 -Scope AllUsers -Force"
+       Install-Module -Name Az -RequiredVersion 16.2.0 -Scope AllUsers -Force"
 
 # GitHub CLI
 RUN curl -fsSL https://cli.github.com/packages/githubcli-archive-keyring.gpg \
