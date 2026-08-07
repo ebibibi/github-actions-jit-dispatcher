@@ -26,6 +26,13 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 # Azure CLI
 RUN curl -sL https://aka.ms/InstallAzureCLIDeb | bash
 
+# Bicep CLI
+# New-AzDeployment -TemplateFile *.bicep は Bicep CLI を要求する。
+# 無いと「Cannot retrieve the dynamic parameters ... Please add Bicep」で失敗する。
+# GitHub ホストランナーには標準搭載されているため、self-hosted へ移行した
+# 時点で気づかないまま壊れる（2026-08-07 に graph-api-proxy / m365reporting で発生）。
+RUN az bicep install && az bicep version
+
 # PowerShell Core (required by azure/powershell@v2 for Bicep deployments)
 RUN apt-get update \
     && apt-get install -y --no-install-recommends wget apt-transport-https software-properties-common \
