@@ -114,7 +114,11 @@ USER runner
 # （システム領域の所有権をいじるより副作用が小さい）
 ENV NPM_CONFIG_PREFIX=/home/runner/.npm-global
 ENV PATH=/home/runner/.npm-global/bin:$PATH
-RUN mkdir -p /home/runner/.npm-global
+# npm は prefix 配下に lib/ と bin/ があることを前提にする。
+# ディレクトリだけ作って lib/ を用意しないと、npm が
+# 'ENOENT: no such file or directory, lstat /home/runner/.npm-global/lib'
+# で失敗する（multistream の SWA デプロイで発生）。
+RUN mkdir -p /home/runner/.npm-global/lib /home/runner/.npm-global/bin
 WORKDIR /home/runner
 
 ENTRYPOINT ["/entrypoint.sh"]
