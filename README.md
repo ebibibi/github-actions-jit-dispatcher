@@ -93,6 +93,37 @@ All configuration is via environment variables:
 | `API_BUDGET_PER_HOUR` | No | `4000` | GitHub API call budget per hour |
 | `RUNNER_LABELS` | No | `self-hosted,linux,x64` | Comma-separated runner labels |
 | `DOCKER_SOCKET` | No | `/var/run/docker.sock` | Path to Docker socket |
+| `DOCKER_SOCKET_REPOS` | No | *(empty)* | Comma-separated repos allowed to mount the Docker socket. **Empty means no repo gets it.** |
+| `RUNNER_MEMORY` | No | `8g` | Memory cap per runner container |
+| `RUNNER_CPUS` | No | `4` | CPU cap per runner container |
+| `RUNNER_PIDS_LIMIT` | No | `2048` | Process cap per runner container |
+
+## Security: the Docker socket is root on the host
+
+Mounting `/var/run/docker.sock` into a runner gives that job root on the host.
+Any workflow step can then run `docker run -v /:/host alpine cat /host/etc/shadow`,
+and container isolation buys you nothing.
+
+This matters because of who writes the code a runner executes:
+
+- A **public** repository accepts pull requests from forks.
+- A `pull_request` workflow runs the workflow file **from the pull request's head**,
+  and its build/test steps run the contributor's code.
+- GitHub does not pass repository secrets to fork pull requests, but it does not
+  need to — with the socket mounted, the job can read them off the host directly.
+
+So the socket is denied by default. List a repository in `DOCKER_SOCKET_REPOS`
+only when both of these hold:
+
+1. The repository genuinely builds container images in CI.
+2. The repository does not run workflows on code from outside contributors
+   (private, or with fork pull request runs requiring approval every time).
+
+Also review GitHub's *Settings → Actions → Fork pull request workflows* for every
+public repository this dispatcher serves. The default, "require approval for
+first-time contributors", stops running a contributor's code only until their
+first pull request is merged.
+
 
 ## Running as a systemd Service
 
