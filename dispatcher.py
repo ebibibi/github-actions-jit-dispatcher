@@ -14,6 +14,12 @@ Configuration via environment variables:
   MAX_PER_REPO_PER_CYCLE Max runners spawned per repo in one poll cycle (default: 1)
   RUNNER_LABELS         Comma-separated runner labels (default: self-hosted,linux,x64)
   DOCKER_SOCKET         Path to Docker socket (default: /var/run/docker.sock)
+  DOCKER_SOCKET_REPOS   Comma-separated repos allowed to mount the Docker
+                        socket (default: none). Mounting the socket grants
+                        root on the host, so it is denied unless listed.
+  RUNNER_MEMORY         Memory cap per runner container (default: 8g)
+  RUNNER_CPUS           CPU cap per runner container (default: 4)
+  RUNNER_PIDS_LIMIT     Process cap per runner container (default: 2048)
 """
 
 import json
@@ -35,6 +41,20 @@ REPOS_REFRESH_INTERVAL = int(os.environ.get("REPOS_REFRESH_SEC", "300"))
 API_CALLS_PER_HOUR_BUDGET = int(os.environ.get("API_BUDGET_PER_HOUR", "4000"))
 RUNNER_LABELS = os.environ.get("RUNNER_LABELS", "self-hosted,linux,x64").split(",")
 DOCKER_SOCKET = os.environ.get("DOCKER_SOCKET", "/var/run/docker.sock")
+# Mounting the host Docker socket into a runner is equivalent to giving that
+# job root on the host: any workflow step can `docker run -v /:/host`. Public
+# repositories accept pull requests from forks, and a fork's `pull_request`
+# workflow runs code the fork controls, so the socket must never be the
+# default. Only repositories that genuinely build images are listed here, and
+# they must be ones that do not accept outside pull requests.
+DOCKER_SOCKET_REPOS = frozenset(
+    name.strip()
+    for name in os.environ.get("DOCKER_SOCKET_REPOS", "").split(",")
+    if name.strip()
+)
+RUNNER_MEMORY = os.environ.get("RUNNER_MEMORY", "8g")
+RUNNER_CPUS = os.environ.get("RUNNER_CPUS", "4")
+RUNNER_PIDS_LIMIT = os.environ.get("RUNNER_PIDS_LIMIT", "2048")
 MAX_PER_REPO_PER_CYCLE = int(os.environ.get("MAX_PER_REPO_PER_CYCLE", "1"))
 MIN_POLL_INTERVAL = 10
 
@@ -169,20 +189,40 @@ def generate_jit_config(repo: str) -> dict | None:
     return github_api("POST", f"/repos/{OWNER}/{repo}/actions/runners/generate-jitconfig", data)
 
 
+def build_run_command(name: str, encoded_jit_config: str, repo: str) -> list[str]:
+    """Build the docker run argv for one ephemeral runner.
+
+    The Docker socket is mounted only for repositories on the allow list. Every
+    container is also capped so that a runaway or hostile job cannot exhaust
+    the host's memory, CPU or process table.
+    """
+    cmd = [
+        "docker", "run", "--rm",
+        "--name", name,
+        "--memory", RUNNER_MEMORY,
+        "--cpus", RUNNER_CPUS,
+        "--pids-limit", RUNNER_PIDS_LIMIT,
+        "-e", f"JIT_CONFIG={encoded_jit_config}",
+    ]
+    if repo in DOCKER_SOCKET_REPOS:
+        cmd += ["-v", f"{DOCKER_SOCKET}:/var/run/docker.sock"]
+    cmd.append(RUNNER_IMAGE)
+    return cmd
+
+
 def spawn_runner(jit_config: dict, repo: str) -> bool:
     encoded = jit_config.get("encoded_jit_config", "")
     runner_info = jit_config.get("runner", {})
     name = runner_info.get("name", f"jit-{int(time.time())}")
 
-    cmd = [
-        "docker", "run", "--rm",
-        "--name", name,
-        "-e", f"JIT_CONFIG={encoded}",
-        "-v", f"{DOCKER_SOCKET}:/var/run/docker.sock",
-        RUNNER_IMAGE,
-    ]
+    cmd = build_run_command(name, encoded, repo)
 
-    log.info("Spawning container %s for %s", name, repo)
+    log.info(
+        "Spawning container %s for %s (docker socket: %s)",
+        name,
+        repo,
+        "mounted" if repo in DOCKER_SOCKET_REPOS else "denied",
+    )
     try:
         proc = subprocess.Popen(
             cmd,
