@@ -160,7 +160,7 @@ def calc_poll_interval(num_repos: int) -> int:
 
 
 def get_active_runs(repo: str) -> list[dict]:
-    result = github_api("GET", f"/repos/{OWNER}/{repo}/actions/runs?per_page=10")
+    result = github_api("GET", f"/repos/{OWNER}/{repo}/actions/runs?per_page=50")
     if result and isinstance(result, dict):
         return [
             r for r in result.get("workflow_runs", [])
