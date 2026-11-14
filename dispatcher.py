@@ -9,8 +9,11 @@ Configuration via environment variables:
   GITHUB_OWNER          GitHub username or org (required)
   RUNNER_IMAGE          Docker image for runners (default: ghactions-runner:latest)
   MAX_CONCURRENT        Max parallel runners (default: 10)
-  REPOS_REFRESH_SEC     Repo discovery interval in seconds (default: 300)
-  API_BUDGET_PER_HOUR   GitHub API calls budget per hour (default: 4000)
+  REPOS_REFRESH_SEC     Repo discovery interval in seconds (default: 3600)
+  API_BUDGET_PER_HOUR   GitHub API calls budget per hour for polling (default: 1500)
+  RATE_LIMIT_RESERVE    Pause all calls until the rate-limit reset once fewer
+                        than this many requests remain (default: 1000). The
+                        limit is shared with every other tool on the account.
   MAX_PER_REPO_PER_CYCLE Max runners spawned per repo in one poll cycle (default: 1)
   RUNNER_LABELS         Comma-separated runner labels (default: self-hosted,linux,x64)
   DOCKER_SOCKET         Path to Docker socket (default: /var/run/docker.sock)
@@ -37,8 +40,9 @@ from threading import Lock
 OWNER = os.environ.get("GITHUB_OWNER", "")
 RUNNER_IMAGE = os.environ.get("RUNNER_IMAGE", "ghactions-runner:latest")
 MAX_CONCURRENT = int(os.environ.get("MAX_CONCURRENT", "10"))
-REPOS_REFRESH_INTERVAL = int(os.environ.get("REPOS_REFRESH_SEC", "300"))
-API_CALLS_PER_HOUR_BUDGET = int(os.environ.get("API_BUDGET_PER_HOUR", "4000"))
+REPOS_REFRESH_INTERVAL = int(os.environ.get("REPOS_REFRESH_SEC", "3600"))
+API_CALLS_PER_HOUR_BUDGET = int(os.environ.get("API_BUDGET_PER_HOUR", "1500"))
+RATE_LIMIT_RESERVE = int(os.environ.get("RATE_LIMIT_RESERVE", "1000"))
 RUNNER_LABELS = os.environ.get("RUNNER_LABELS", "self-hosted,linux,x64").split(",")
 DOCKER_SOCKET = os.environ.get("DOCKER_SOCKET", "/var/run/docker.sock")
 # Mounting the host Docker socket into a runner is equivalent to giving that
@@ -73,6 +77,13 @@ cached_repos: list[str] = []
 repos_last_refreshed: float = 0
 # Rotating scan offset for poll_cycle, advanced each cycle to keep repos fair
 poll_offset: int = 0
+# Epoch seconds until which no API call is made (rate limit exhausted or low)
+rate_limited_until: float = 0
+# repo name -> (pushed_at, targets self-hosted). Lets discovery skip repos that
+# have not been pushed since their workflows were last read.
+repo_scan_cache: dict[str, tuple[str, bool]] = {}
+# HTTP status of the last failed API call (None after a success)
+last_error_status: int | None = None
 
 
 def load_token() -> str:
@@ -83,12 +94,61 @@ def load_token() -> str:
     return token
 
 
-def github_api(method: str, path: str, data: dict | None = None):
+def _header_int(headers, name: str) -> int | None:
+    value = headers.get(name) if headers is not None else None
+    try:
+        return int(value) if value is not None else None
+    except ValueError:
+        return None
+
+
+def note_rate_limit(headers, status: int | None = None) -> None:
+    """Pause every API call until the reset time when the limit is low or hit.
+
+    The REST limit belongs to the account, not to this process: gh CLI and
+    other scripts draw from the same 5,000 requests/hour. Stopping at a reserve
+    leaves them room, and stopping on a rejection avoids hammering the API with
+    requests that can only fail until the window resets.
+    """
+    global rate_limited_until
+
+    remaining = _header_int(headers, "X-RateLimit-Remaining")
+    reset = _header_int(headers, "X-RateLimit-Reset")
+    retry_after = _header_int(headers, "Retry-After")
+    now = time.time()
+
+    until = 0.0
+    if retry_after is not None and status in (403, 429):
+        until = now + retry_after
+    elif remaining is not None and reset is not None:
+        if remaining == 0 or (remaining < RATE_LIMIT_RESERVE and status is None):
+            until = reset + 1
+
+    if until > rate_limited_until:
+        rate_limited_until = until
+        log.warning(
+            "GitHub rate limit low (remaining=%s); pausing API calls for %.0fs",
+            remaining,
+            until - now,
+        )
+
+
+def rate_limit_pause() -> float:
+    """Seconds left before API calls may resume (0 when not paused)."""
+    return max(0.0, rate_limited_until - time.time())
+
+
+def github_api(method: str, path: str, data: dict | None = None, raw: bool = False):
+    global last_error_status
+    last_error_status = None
+    if rate_limit_pause() > 0:
+        last_error_status = 429
+        return None
     token = load_token()
     url = f"https://api.github.com{path}"
     headers = {
         "Authorization": f"token {token}",
-        "Accept": "application/vnd.github+json",
+        "Accept": "application/vnd.github.raw+json" if raw else "application/vnd.github+json",
         "X-GitHub-Api-Version": "2022-11-28",
     }
     body = json.dumps(data).encode() if data else None
@@ -97,23 +157,66 @@ def github_api(method: str, path: str, data: dict | None = None):
         req.add_header("Content-Type", "application/json")
     try:
         with urllib.request.urlopen(req, timeout=30) as resp:
-            return json.loads(resp.read())
+            note_rate_limit(resp.headers)
+            content = resp.read()
+            return content.decode("utf-8", "replace") if raw else json.loads(content)
     except urllib.error.HTTPError as e:
-        if e.code == 403:
+        last_error_status = e.code
+        note_rate_limit(e.headers, e.code)
+        if e.code == 404:
+            log.debug("API %s %s -> 404", method, path)
+        elif e.code in (403, 429):
             log.warning("Rate limit or permission denied: %s %s -> %d", method, path, e.code)
         else:
             log.warning("API %s %s -> %d", method, path, e.code)
         return None
     except Exception as e:
+        last_error_status = -1
         log.error("API error: %s", e)
         return None
 
 
+def workflow_targets_self_hosted(text: str, label: str) -> bool:
+    """True when a workflow file mentions the self-hosted label outside comments."""
+    for line in text.splitlines():
+        code = line.split("#", 1)[0]
+        if label in code:
+            return True
+    return False
+
+
+def repo_targets_self_hosted(repo: str) -> bool | None:
+    """Whether any workflow in the repo targets our runners; None if unknown."""
+    listing = github_api("GET", f"/repos/{OWNER}/{repo}/contents/.github/workflows")
+    if listing is None:
+        # No workflows directory means no jobs; any other failure is unknown
+        # and must not be cached as "no self-hosted jobs".
+        return False if last_error_status == 404 else None
+    if not isinstance(listing, list):
+        return False
+    for entry in listing:
+        name = entry.get("name", "")
+        if entry.get("type") != "file" or not name.endswith((".yml", ".yaml")):
+            continue
+        text = github_api("GET", f"/repos/{OWNER}/{repo}/contents/{entry['path']}", raw=True)
+        if text is None:
+            return None
+        if workflow_targets_self_hosted(text, RUNNER_LABELS[0]):
+            return True
+    return False
+
+
 def discover_repos() -> list[str]:
+    """Return the repos whose workflows target self-hosted runners.
+
+    Repos that only use GitHub-hosted runners can never queue a job for us, so
+    polling them wastes the shared rate limit. Workflow files are re-read only
+    for repos pushed since the last scan.
+    """
     global cached_repos, repos_last_refreshed
 
     now = time.time()
-    if cached_repos and now - repos_last_refreshed < REPOS_REFRESH_INTERVAL:
+    if repos_last_refreshed and now - repos_last_refreshed < REPOS_REFRESH_INTERVAL:
         return cached_repos
 
     all_repos: list[dict] = []
@@ -121,35 +224,42 @@ def discover_repos() -> list[str]:
     while True:
         result = github_api("GET", f"/user/repos?per_page=100&affiliation=owner&page={page}")
         if not result or not isinstance(result, list):
+            if result is None:
+                log.warning("Failed to list repos, keeping previous cache")
+                return cached_repos
             break
         all_repos.extend(result)
         if len(result) < 100:
             break
         page += 1
 
-    if not all_repos:
-        log.warning("Failed to list repos, keeping previous cache")
-        return cached_repos
-
-    repos_with_workflows: list[str] = []
+    selected: list[str] = []
     for repo in all_repos:
+        if repo.get("archived") or repo.get("disabled"):
+            continue
         name = repo["name"]
-        wf = github_api("GET", f"/repos/{OWNER}/{name}/actions/workflows?per_page=1")
-        if wf and isinstance(wf, dict) and wf.get("total_count", 0) > 0:
-            repos_with_workflows.append(name)
+        pushed_at = repo.get("pushed_at") or ""
+        cached = repo_scan_cache.get(name)
+        if cached and cached[0] == pushed_at:
+            uses = cached[1]
+        else:
+            uses = repo_targets_self_hosted(name)
+            if uses is None:
+                log.warning("Discovery interrupted at %s, keeping previous cache", name)
+                return cached_repos
+            repo_scan_cache[name] = (pushed_at, uses)
+        if uses:
+            selected.append(name)
 
-    if repos_with_workflows:
-        if set(repos_with_workflows) != set(cached_repos):
-            log.info(
-                "Repos with workflows (%d): %s",
-                len(repos_with_workflows),
-                ", ".join(sorted(repos_with_workflows)),
-            )
-        cached_repos = repos_with_workflows
-        repos_last_refreshed = now
-    else:
-        log.warning("No repos with workflows found, keeping previous cache")
-
+    if set(selected) != set(cached_repos):
+        log.info(
+            "Repos targeting self-hosted runners (%d of %d): %s",
+            len(selected),
+            len(all_repos),
+            ", ".join(sorted(selected)),
+        )
+    cached_repos = selected
+    repos_last_refreshed = now
     return cached_repos
 
 
@@ -290,7 +400,7 @@ def poll_cycle(repos: list[str]):
         poll_offset += 1
 
     for repo in repos:
-        if total_active >= MAX_CONCURRENT:
+        if total_active >= MAX_CONCURRENT or rate_limit_pause() > 0:
             break
 
         # A repo with a burst of queued jobs (a batch of Dependabot PRs, say)
@@ -343,6 +453,11 @@ def main():
     )
 
     while running:
+        pause = rate_limit_pause()
+        if pause > 0:
+            cleanup_finished()
+            time.sleep(min(pause, 60))
+            continue
         try:
             repos = discover_repos()
             poll_interval = calc_poll_interval(len(repos))
