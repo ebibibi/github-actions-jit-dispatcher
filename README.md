@@ -6,7 +6,7 @@ A lightweight, single-file dispatcher that monitors your GitHub repositories for
 
 GitHub Actions' free tier includes 2,000 minutes/month for private repos. If you exceed that, you either pay or self-host. This project lets you run a single dispatcher process on any Linux machine that automatically:
 
-1. **Discovers** all your repos with workflows (no manual config needed)
+1. **Discovers** your repos whose workflows target `self-hosted` runners (no manual config needed)
 2. **Detects** queued jobs via the GitHub API
 3. **Spawns** ephemeral Docker containers as JIT runners
 4. **Cleans up** automatically when jobs finish (`docker run --rm`)
@@ -36,7 +36,8 @@ No Kubernetes. No Actions Runner Controller. Just Python + Docker.
 - **JIT runners** — each job gets a fresh runner via GitHub's `generate-jitconfig` API. No persistent registration needed.
 - **Docker isolation** — jobs run in containers, not on the host. Clean environment every time.
 - **Adaptive polling** — interval auto-adjusts based on repo count to stay within API rate limits: `max(10, ceil(3600 × (N+2) / budget))` seconds.
-- **Dynamic repo discovery** — repos are discovered every 5 minutes via the API. Add a workflow to any repo and it's automatically picked up.
+- **Dynamic repo discovery** — every hour, repos whose workflow files mention the `self-hosted` label are selected. Repos that only use GitHub-hosted runners are never polled, and a repo's workflow files are re-read only after it has been pushed.
+- **Shares the rate limit politely** — the REST limit (5,000/hour) belongs to your account, not to the dispatcher. When fewer than `RATE_LIMIT_RESERVE` requests remain, or a request is rate limited, the dispatcher stops calling the API until the reset time.
 
 ## Quick Start
 
@@ -89,8 +90,9 @@ All configuration is via environment variables:
 | `GITHUB_OWNER` | Yes | — | GitHub username or organization |
 | `RUNNER_IMAGE` | No | `ghactions-runner:latest` | Docker image for runners |
 | `MAX_CONCURRENT` | No | `10` | Maximum parallel runner containers |
-| `REPOS_REFRESH_SEC` | No | `300` | Repo discovery interval (seconds) |
-| `API_BUDGET_PER_HOUR` | No | `4000` | GitHub API call budget per hour |
+| `REPOS_REFRESH_SEC` | No | `3600` | Repo discovery interval (seconds) |
+| `API_BUDGET_PER_HOUR` | No | `1500` | GitHub API call budget per hour for polling |
+| `RATE_LIMIT_RESERVE` | No | `1000` | Pause until the reset when fewer requests than this remain |
 | `RUNNER_LABELS` | No | `self-hosted,linux,x64` | Comma-separated runner labels |
 | `DOCKER_SOCKET` | No | `/var/run/docker.sock` | Path to Docker socket |
 | `DOCKER_SOCKET_REPOS` | No | *(empty)* | Comma-separated repos allowed to mount the Docker socket. **Empty means no repo gets it.** |
